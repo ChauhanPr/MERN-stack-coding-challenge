@@ -1,0 +1,239 @@
+Backend Task
+1. Initialize Database with Seed Data
+We need to create an API that fetches data from the third-party API and initializes the database. Let's define a table structure for storing transaction data.
+
+Table Structure:
+
+Transactions Table: This table will store product transaction data.
+
+Column Name	Data Type	Description
+id	INT	Primary Key
+title	VARCHAR(255)	Product Title
+description	TEXT	Product Description
+price	DECIMAL(10,2)	Product Price
+category	VARCHAR(100)	Product Category
+quantitySold	INT	Quantity of product sold
+quantityUnsold	INT	Quantity of product unsold (if applicable)
+dateOfSale	DATE	Date of Sale (Only month will be used for filtering)
+transactionAmount	DECIMAL(10,2)	Transaction total amount (quantitySold * price)
+API to initialize the database:
+
+Fetch data from the third-party API (https://s3.amazonaws.com/roxiler.com/product_transaction.json).
+Parse the JSON and insert the relevant data into the database.
+
+
+import requests
+from datetime import datetime
+import sqlite3
+
+def initialize_database():
+    url = 'https://s3.amazonaws.com/roxiler.com/product_transaction.json'
+    response = requests.get(url)
+    data = response.json()
+    
+    conn = sqlite3.connect('transactions.db')
+    cursor = conn.cursor()
+    
+    # Create table if not exists
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS transactions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT,
+        description TEXT,
+        price DECIMAL(10, 2),
+        category TEXT,
+        quantitySold INTEGER,
+        quantityUnsold INTEGER,
+        dateOfSale DATE,
+        transactionAmount DECIMAL(10, 2)
+    )
+    ''')
+
+    # Insert data
+    for item in data:
+        title = item['title']
+        description = item['description']
+        price = item['price']
+        category = item['category']
+        quantitySold = item['quantitySold']
+        quantityUnsold = item['quantityUnsold']
+        dateOfSale = datetime.strptime(item['dateOfSale'], '%Y-%m-%d').date()
+        transactionAmount = quantitySold * price
+
+        cursor.execute('''
+        INSERT INTO transactions (title, description, price, category, quantitySold, 
+        quantityUnsold, dateOfSale, transactionAmount)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title, description, price, category, quantitySold, quantityUnsold, dateOfSale, transactionAmount))
+
+    conn.commit()
+    conn.close()
+
+2. List Transactions API
+This API will support search, pagination, and return transaction data filtered by the selected month.
+
+from flask import Flask, request, jsonify
+import sqlite3
+import calendar
+
+app = Flask(__name__)
+
+@app.route('/api/transactions', methods=['GET'])
+def get_transactions():
+    month = request.args.get('month', default='March')
+    search_text = request.args.get('search', default='')
+    page = int(request.args.get('page', default=1))
+    per_page = int(request.args.get('per_page', default=10))
+    
+    month_num = list(calendar.month_name).index(month.capitalize())
+    
+    # Database connection
+    conn = sqlite3.connect('transactions.db')
+    cursor = conn.cursor()
+
+    # Query to fetch filtered and paginated transactions
+    query = '''
+    SELECT * FROM transactions 
+    WHERE strftime('%m', dateOfSale) = ? 
+    AND (title LIKE ? OR description LIKE ? OR price LIKE ?)
+    LIMIT ? OFFSET ?
+    '''
+    cursor.execute(query, (str(month_num).zfill(2), f'%{search_text}%', f'%{search_text}%', f'%{search_text}%', per_page, (page-1)*per_page))
+    transactions = cursor.fetchall()
+    
+    # Returning transactions
+    result = []
+    for row in transactions:
+        result.append({
+            'id': row[0],
+            'title': row[1],
+            'description': row[2],
+            'price': row[3],
+            'category': row[4],
+            'quantitySold': row[5],
+            'quantityUnsold': row[6],
+            'dateOfSale': row[7],
+            'transactionAmount': row[8]
+        })
+    
+    conn.close()
+    return jsonify(result)
+
+if __name__ == '__main__':
+    app.run(debug=True)
+
+3. Statistics API
+This API calculates the total sales, total number of sold items, and total number of unsold items for the selected month.
+
+@app.route('/api/statistics', methods=['GET'])
+def get_statistics():
+    month = request.args.get('month', default='March')
+    
+    month_num = list(calendar.month_name).index(month.capitalize())
+    
+    # Database connection
+    conn = sqlite3.connect('transactions.db')
+    cursor = conn.cursor()
+
+    # Query to get the statistics
+    cursor.execute('''
+    SELECT SUM(transactionAmount), SUM(quantitySold), SUM(quantityUnsold)
+    FROM transactions
+    WHERE strftime('%m', dateOfSale) = ?
+    ''', (str(month_num).zfill(2),))
+    
+    stats = cursor.fetchone()
+    
+    conn.close()
+    
+    return jsonify({
+        'totalSaleAmount': stats[0] or 0,
+        'totalSoldItems': stats[1] or 0,
+        'totalUnsoldItems': stats[2] or 0
+    })
+
+4. Bar Chart API
+This API generates the number of items in specific price ranges for the selected month.
+
+@app.route('/api/bar-chart', methods=['GET'])
+def get_bar_chart():
+    month = request.args.get('month', default='March')
+    
+    month_num = list(calendar.month_name).index(month.capitalize())
+    
+    price_ranges = [
+        (0, 100),
+        (101, 200),
+        (201, 300),
+        (301, 400),
+        (401, 500),
+        (501, 600),
+        (601, 700),
+        (701, 800),
+        (801, 900),
+        (901, float('inf'))
+    ]
+    
+    range_counts = []
+    
+    # Database connection
+    conn = sqlite3.connect('transactions.db')
+    cursor = conn.cursor()
+    
+    for min_price, max_price in price_ranges:
+        cursor.execute('''
+        SELECT COUNT(*) FROM transactions 
+        WHERE strftime('%m', dateOfSale) = ? AND price BETWEEN ? AND ?
+        ''', (str(month_num).zfill(2), min_price, max_price))
+        
+        count = cursor.fetchone()[0]
+        range_counts.append({'range': f'{min_price}-{max_price if max_price != float("inf") else "above"}', 'count': count})
+    
+    conn.close()
+    return jsonify(range_counts)
+
+5. Pie Chart API
+This API generates a count of items per category for the selected month.
+
+@app.route('/api/pie-chart', methods=['GET'])
+def get_pie_chart():
+    month = request.args.get('month', default='March')
+    
+    month_num = list(calendar.month_name).index(month.capitalize())
+    
+    # Database connection
+    conn = sqlite3.connect('transactions.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT category, COUNT(*) FROM transactions
+    WHERE strftime('%m', dateOfSale) = ?
+    GROUP BY category
+    ''', (str(month_num).zfill(2),))
+    
+    categories = cursor.fetchall()
+    
+    conn.close()
+    
+    result = {cat[0]: cat[1] for cat in categories}
+    
+    return jsonify(result)
+
+6. Combined Data API
+This API combines the results from the above APIs into a single response.
+
+@app.route('/api/combined', methods=['GET'])
+def get_combined_data():
+    month = request.args.get('month', default='March')
+    
+    statistics = get_statistics().get_json()
+    bar_chart = get_bar_chart().get_json()
+    pie_chart = get_pie_chart().get_json()
+    
+    combined_response = {
+        'statistics': statistics,
+        'barChart': bar_chart,
+        'pieChart': pie_chart
+    }
+    
+    return jsonify(combined_response)
